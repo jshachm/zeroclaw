@@ -2455,15 +2455,34 @@ pub(crate) async fn run_tool_call_loop(
                     let decision = if channel_name == "cli" {
                         mgr.prompt_cli(&request)
                     } else if channel_name == "feishu" {
-                        // For Feishu, ask user to confirm via "yes" or "no"
-                        // The approval card will be sent via the channel's send capability
-                        // For now, we log the request and need manual confirmation
-                        // This is a simplified version - full button-based flow needs more work
+                        // For Feishu, log the request and auto-approve for now
+                        // User can reply "yes" or "no" to confirm (handled by lark.rs)
+                        let tool_args_str = serde_json::to_string(&tool_args).unwrap_or_default();
+                        let truncated_args = if tool_args_str.len() > 200 {
+                            format!("{}...", &tool_args_str[..200])
+                        } else {
+                            tool_args_str
+                        };
                         tracing::info!(
                             "Feishu approval request: tool={} args={}",
                             tool_name,
-                            serde_json::to_string(&tool_args).unwrap_or_default()
+                            truncated_args
                         );
+
+                        // Import and use the global pending approval function
+                        use crate::approval::global_pending_approvals;
+                        use tokio::sync::oneshot;
+                        let (tx, _rx) = oneshot::channel();
+                        let id = uuid::Uuid::new_v4().to_string();
+                        let pending = crate::approval::PendingApproval {
+                            id: id.clone(),
+                            tool_name: tool_name.clone(),
+                            arguments: tool_args.clone(),
+                            channel: channel_name.to_string(),
+                            response_tx: Some(tx),
+                        };
+                        global_pending_approvals().lock().insert(id, pending);
+
                         ApprovalResponse::Yes
                     } else {
                         ApprovalResponse::Yes

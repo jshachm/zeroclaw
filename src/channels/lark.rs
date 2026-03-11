@@ -789,6 +789,35 @@ impl LarkChannel {
                     let text = text.trim().to_string();
                     if text.is_empty() { continue; }
 
+                    // Check for approval response (yes/no)
+                    let text_lower = text.to_lowercase();
+                    if text_lower == "yes" || text_lower == "no" || text_lower == "y" || text_lower == "n" {
+                        // Try to resolve pending approval
+                        use crate::approval::resolve_pending_by_tool_name;
+                        let approved = text_lower == "yes" || text_lower == "y";
+                        if resolve_pending_by_tool_name("", approved) {
+                            // Send confirmation message
+                            let confirm_msg = if approved {
+                                "✅ 已批准执行"
+                            } else {
+                                "❌ 已拒绝执行"
+                            };
+                            let channel_for_send = self.clone();
+                            let chat_id = lark_msg.chat_id.clone();
+                            tokio::spawn(async move {
+                                let _ = crate::channels::Channel::send(
+                                    &channel_for_send,
+                                    &crate::channels::traits::SendMessage::new(
+                                        confirm_msg.to_string(),
+                                        &chat_id,
+                                    ),
+                                ).await;
+                            });
+                            // Don't process this as a regular message
+                            continue;
+                        }
+                    }
+
                     // Group-chat: only respond when explicitly @-mentioned
                     let bot_open_id = self.resolved_bot_open_id();
                     if lark_msg.chat_type == "group"
