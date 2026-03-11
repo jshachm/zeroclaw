@@ -1993,6 +1993,10 @@ fn should_execute_tools_in_parallel(
 
     if let Some(mgr) = approval {
         if tool_calls.iter().any(|call| mgr.needs_approval(&call.name)) {
+            tracing::error!(
+                "🔍 DEBUG PARALLEL: tool needs approval: {:?}",
+                tool_calls.iter().map(|c| &c.name).collect::<Vec<_>>()
+            );
             // Approval-gated calls must keep sequential handling so the caller can
             // enforce CLI prompt/deny policy consistently.
             return false;
@@ -2452,6 +2456,11 @@ pub(crate) async fn run_tool_call_loop(
                     };
 
                     // For Feishu, send interactive approval request
+                    tracing::error!(
+                        "🔍 DEBUG: channel_name={} tool_name={}",
+                        channel_name,
+                        tool_name
+                    );
                     let decision = if channel_name == "cli" {
                         mgr.prompt_cli(&request)
                     } else if channel_name == "feishu" {
