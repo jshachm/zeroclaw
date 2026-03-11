@@ -11,7 +11,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
+use std::sync::Arc;
 use tokio::sync::oneshot;
+
+// ── Global pending approvals for Feishu ─────────────────────────────
+
+/// Global storage for pending approvals (used by Feishu channel)
+static PENDING_APPROVALS: std::sync::LazyLock<Arc<Mutex<HashMap<String, PendingApproval>>>> =
+    std::sync::LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+/// Get global pending approvals storage
+pub fn global_pending_approvals() -> Arc<Mutex<HashMap<String, PendingApproval>>> {
+    Arc::clone(&PENDING_APPROVALS)
+}
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -23,6 +35,18 @@ pub struct PendingApproval {
     pub arguments: serde_json::Value,
     pub channel: String,
     pub response_tx: Option<oneshot::Sender<ApprovalResponse>>,
+}
+
+impl Clone for PendingApproval {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            tool_name: self.tool_name.clone(),
+            arguments: self.arguments.clone(),
+            channel: self.channel.clone(),
+            response_tx: None, // Can't clone the sender
+        }
+    }
 }
 
 /// A request to approve a tool call before execution.
@@ -107,7 +131,12 @@ impl ApprovalManager {
             response_tx: Some(tx),
         };
 
-        self.pending_approvals.lock().insert(id.clone(), pending);
+        self.pending_approvals
+            .lock()
+            .insert(id.clone(), pending.clone());
+
+        // Also add to global storage for cross-component access
+        PENDING_APPROVALS.lock().insert(id.clone(), pending);
 
         tracing::info!(
             "Created pending approval: {} for tool {} on channel {}",
@@ -117,6 +146,38 @@ impl ApprovalManager {
         );
 
         (id, rx)
+    }
+
+    /// Check and resolve pending approval by tool name (for simple yes/no response)
+    /// Returns true if a pending approval was found and resolved
+    pub fn check_and_resolve_by_tool(&self, tool_name: &str, approved: bool) -> bool {
+        let response = if approved {
+            ApprovalResponse::Yes
+        } else {
+            ApprovalResponse::No
+        };
+
+        // Find pending approval for this tool
+        let mut pending_map = self.pending_approvals.lock();
+        if let Some((id, pending)) = pending_map
+            .iter_mut()
+            .find(|(_, p)| p.tool_name == tool_name)
+        {
+            let id = id.clone();
+            if let Some(tx) = pending.response_tx.take() {
+                let _ = tx.send(response);
+                tracing::info!(
+                    "Resolved pending approval for tool {} with {:?}",
+                    tool_name,
+                    response
+                );
+                pending_map.remove(&id);
+                // Also remove from global
+                PENDING_APPROVALS.lock().remove(&id);
+                return true;
+            }
+        }
+        false
     }
 
     /// Resolve a pending approval by ID
@@ -505,4 +566,45 @@ mod tests {
         let parsed: ApprovalRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tool_name, "shell");
     }
+}
+
+// ── Global functions for cross-component access ───────────────────────
+
+/// Resolve a pending approval by tool name (for simple yes/no response)
+/// This can be called from channels like Feishu when user replies with yes/no
+pub fn resolve_pending_by_tool_name(tool_name: &str, approved: bool) -> bool {
+    let response = if approved {
+        ApprovalResponse::Yes
+    } else {
+        ApprovalResponse::No
+    };
+
+    let mut global_pending = PENDING_APPROVALS.lock();
+    if let Some((id, pending)) = global_pending
+        .iter_mut()
+        .find(|(_, p)| p.tool_name == tool_name)
+    {
+        let id = id.clone();
+        if let Some(tx) = pending.response_tx.take() {
+            let _ = tx.send(response);
+            tracing::info!(
+                "Globally resolved pending approval for tool {} with {:?}",
+                tool_name,
+                response
+            );
+            global_pending.remove(&id);
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if there are any pending approvals
+pub fn has_pending_approvals() -> bool {
+    !PENDING_APPROVALS.lock().is_empty()
+}
+
+/// Get count of pending approvals
+pub fn pending_approval_count() -> usize {
+    PENDING_APPROVALS.lock().len()
 }
