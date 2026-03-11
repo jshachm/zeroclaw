@@ -8,10 +8,22 @@ use crate::security::AutonomyLevel;
 use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
+use tokio::sync::oneshot;
 
 // ── Types ────────────────────────────────────────────────────────
+
+/// Pending approval request with response channel
+#[derive(Debug)]
+pub struct PendingApproval {
+    pub id: String,
+    pub tool_name: String,
+    pub arguments: serde_json::Value,
+    pub channel: String,
+    pub response_tx: Option<oneshot::Sender<ApprovalResponse>>,
+}
 
 /// A request to approve a tool call before execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +72,8 @@ pub struct ApprovalManager {
     session_allowlist: Mutex<HashSet<String>>,
     /// Audit trail of approval decisions.
     audit_log: Mutex<Vec<ApprovalLogEntry>>,
+    /// Pending approval requests waiting for user response
+    pending_approvals: Mutex<HashMap<String, PendingApproval>>,
 }
 
 impl ApprovalManager {
@@ -71,7 +85,65 @@ impl ApprovalManager {
             autonomy_level: config.level,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
+            pending_approvals: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Create a pending approval request and return its ID and response receiver
+    pub fn create_pending_approval(
+        &self,
+        tool_name: String,
+        arguments: serde_json::Value,
+        channel: String,
+    ) -> (String, oneshot::Receiver<ApprovalResponse>) {
+        let (tx, rx) = oneshot::channel();
+        let id = uuid::Uuid::new_v4().to_string();
+
+        let pending = PendingApproval {
+            id: id.clone(),
+            tool_name: tool_name.clone(),
+            arguments: arguments.clone(),
+            channel: channel.clone(),
+            response_tx: Some(tx),
+        };
+
+        self.pending_approvals.lock().insert(id.clone(), pending);
+
+        tracing::info!(
+            "Created pending approval: {} for tool {} on channel {}",
+            id,
+            tool_name,
+            channel
+        );
+
+        (id, rx)
+    }
+
+    /// Resolve a pending approval by ID
+    pub fn resolve_pending_approval(&self, id: &str, response: ApprovalResponse) -> bool {
+        let mut pending = self.pending_approvals.lock();
+        if let Some(approval) = pending.remove(id) {
+            if let Some(tx) = approval.response_tx {
+                let _ = tx.send(response);
+                tracing::info!("Resolved pending approval: {} with {:?}", id, response);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get pending approval info by ID
+    pub fn get_pending_approval(&self, id: &str) -> Option<PendingApproval> {
+        self.pending_approvals
+            .lock()
+            .get(id)
+            .map(|p| PendingApproval {
+                id: p.id.clone(),
+                tool_name: p.tool_name.clone(),
+                arguments: p.arguments.clone(),
+                channel: p.channel.clone(),
+                response_tx: None,
+            })
     }
 
     /// Check whether a tool call requires interactive approval.

@@ -2451,9 +2451,19 @@ pub(crate) async fn run_tool_call_loop(
                         arguments: tool_args.clone(),
                     };
 
-                    // Only prompt interactively on CLI; auto-approve on other channels.
+                    // For Feishu, send interactive approval request
                     let decision = if channel_name == "cli" {
                         mgr.prompt_cli(&request)
+                    } else if channel_name == "feishu" {
+                        // For Feishu, we need to implement async approval
+                        // For now, log the request and auto-approve
+                        // TODO: Implement full async approval with button callbacks
+                        tracing::info!(
+                            "Feishu approval request: tool={} args={}",
+                            tool_name,
+                            serde_json::to_string(&tool_args).unwrap_or_default()
+                        );
+                        ApprovalResponse::Yes
                     } else {
                         ApprovalResponse::Yes
                     };

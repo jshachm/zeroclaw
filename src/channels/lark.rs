@@ -298,6 +298,8 @@ pub struct LarkChannel {
     mention_only: bool,
     /// When true, use Feishu (CN) endpoints; when false, use Lark (international).
     use_feishu: bool,
+    /// Platform: Feishu (CN) or Lark (International)
+    platform: LarkPlatform,
     /// How to receive events: WebSocket long-connection or HTTP webhook.
     receive_mode: crate::config::schema::LarkReceiveMode,
     /// Cached tenant access token
@@ -315,14 +317,16 @@ impl LarkChannel {
         allowed_users: Vec<String>,
         mention_only: bool,
     ) -> Self {
-        Self::new_with_platform(
+        let mut ch = Self::new_with_platform(
             app_id,
             app_secret,
             verification_token,
             port,
             allowed_users,
             LarkPlatform::Lark,
-        )
+        );
+        ch.mention_only = mention_only;
+        ch
     }
 
     fn new_with_platform(
@@ -340,8 +344,9 @@ impl LarkChannel {
             port,
             allowed_users,
             resolved_bot_open_id: Arc::new(StdRwLock::new(None)),
-            mention_only,
-            use_feishu: true,
+            mention_only: false,
+            use_feishu: platform == LarkPlatform::Feishu,
+            platform,
             receive_mode: crate::config::schema::LarkReceiveMode::default(),
             tenant_token: Arc::new(RwLock::new(None)),
             ws_seen_ids: Arc::new(RwLock::new(HashMap::new())),
@@ -362,7 +367,37 @@ impl LarkChannel {
             config.verification_token.clone().unwrap_or_default(),
             config.port,
             config.allowed_users.clone(),
-            config.mention_only,
+            platform,
+        );
+        ch.mention_only = config.mention_only;
+        ch.receive_mode = config.receive_mode.clone();
+        ch
+    }
+
+    /// Build from `LarkConfig` (international version)
+    pub fn from_lark_config(config: &crate::config::schema::LarkConfig) -> Self {
+        let mut ch = Self::new_with_platform(
+            config.app_id.clone(),
+            config.app_secret.clone(),
+            config.verification_token.clone().unwrap_or_default(),
+            config.port,
+            config.allowed_users.clone(),
+            LarkPlatform::Lark,
+        );
+        ch.mention_only = config.mention_only;
+        ch.receive_mode = config.receive_mode.clone();
+        ch
+    }
+
+    /// Build from `FeishuConfig` (Chinese version)
+    pub fn from_feishu_config(config: &crate::config::schema::FeishuConfig) -> Self {
+        let mut ch = Self::new_with_platform(
+            config.app_id.clone(),
+            config.app_secret.clone(),
+            config.verification_token.clone().unwrap_or_default(),
+            config.port,
+            config.allowed_users.clone(),
+            LarkPlatform::Feishu,
         );
         ch.receive_mode = config.receive_mode.clone();
         ch
@@ -1141,6 +1176,78 @@ impl Channel for LarkChannel {
 
     async fn health_check(&self) -> bool {
         self.get_tenant_access_token().await.is_ok()
+    }
+}
+
+// LarkChannel specific methods
+impl LarkChannel {
+    /// Send an interactive card message with approval buttons
+    pub async fn send_approval_card(
+        &self,
+        recipient: &str,
+        tool_name: &str,
+        tool_args: &str,
+    ) -> anyhow::Result<()> {
+        let token = self.get_tenant_access_token().await?;
+        let url = self.send_message_url();
+
+        let card_json = serde_json::json!({
+            "config": {
+                "wide_screen_mode": true
+            },
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": "🔐 需要审批"
+                },
+                "template": "blue"
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": format!("**工具**: {}\n**参数**: {}", tool_name, tool_args)
+                },
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": "✅ 同意"
+                            },
+                            "type": "primary",
+                            "value": {
+                                "action": "approve",
+                                "tool": tool_name
+                            }
+                        },
+                        {
+                            "tag": "button",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": "❌ 拒绝"
+                            },
+                            "type": "default",
+                            "value": {
+                                "action": "deny",
+                                "tool": tool_name
+                            }
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let body = serde_json::json!({
+            "receive_id": recipient,
+            "msg_type": "interactive",
+            "content": card_json.to_string()
+        });
+
+        let (status, response) = self.send_text_once(&url, &token, &body).await?;
+        ensure_lark_send_success(status, &response, "approval card")?;
+        Ok(())
     }
 }
 

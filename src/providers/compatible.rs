@@ -310,7 +310,9 @@ impl OpenAiCompatibleProvider {
 struct ApiChatRequest {
     model: String,
     messages: Vec<Message>,
-    temperature: f64,
+    /// Temperature is optional to support models like kimi-k2.5 that don't accept this parameter
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -502,7 +504,9 @@ struct Function {
 struct NativeChatRequest {
     model: String,
     messages: Vec<NativeMessage>,
-    temperature: f64,
+    /// Temperature is optional to support models like kimi-k2.5 that don't accept this parameter
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1138,10 +1142,17 @@ impl Provider for OpenAiCompatibleProvider {
             });
         }
 
+        // kimi-k2.5 doesn't accept temperature parameter
+        let effective_temperature = if model == "kimi-k2.5" {
+            None
+        } else {
+            Some(temperature)
+        };
+
         let request = ApiChatRequest {
             model: model.to_string(),
             messages,
-            temperature,
+            temperature: effective_temperature,
             stream: Some(false),
             tools: None,
             tool_choice: None,
@@ -1260,10 +1271,17 @@ impl Provider for OpenAiCompatibleProvider {
             })
             .collect();
 
+        // kimi-k2.5 doesn't accept temperature parameter
+        let effective_temperature = if model == "kimi-k2.5" {
+            None
+        } else {
+            Some(temperature)
+        };
+
         let request = ApiChatRequest {
             model: model.to_string(),
             messages: api_messages,
-            temperature,
+            temperature: effective_temperature,
             stream: Some(false),
             tools: None,
             tool_choice: None,
@@ -1370,10 +1388,17 @@ impl Provider for OpenAiCompatibleProvider {
             })
             .collect();
 
+        // kimi-k2.5 doesn't accept temperature parameter
+        let effective_temperature = if model == "kimi-k2.5" {
+            None
+        } else {
+            Some(temperature)
+        };
+
         let request = ApiChatRequest {
             model: model.to_string(),
             messages: api_messages,
-            temperature,
+            temperature: effective_temperature,
             stream: Some(false),
             tools: if tools.is_empty() {
                 None
@@ -1471,13 +1496,21 @@ impl Provider for OpenAiCompatibleProvider {
         } else {
             request.messages.to_vec()
         };
+
+        // kimi-k2.5 doesn't accept temperature parameter
+        let effective_temperature = if model == "kimi-k2.5" {
+            None
+        } else {
+            Some(temperature)
+        };
+
         let native_request = NativeChatRequest {
             model: model.to_string(),
             messages: Self::convert_messages_for_native(
                 &effective_messages,
                 !self.merge_system_into_user,
             ),
-            temperature,
+            temperature: effective_temperature,
             stream: Some(false),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
@@ -1616,10 +1649,17 @@ impl Provider for OpenAiCompatibleProvider {
             content: Self::to_message_content("user", message, !self.merge_system_into_user),
         });
 
+        // kimi-k2.5 doesn't accept temperature parameter
+        let effective_temperature = if model == "kimi-k2.5" {
+            None
+        } else {
+            Some(temperature)
+        };
+
         let request = ApiChatRequest {
             model: model.to_string(),
             messages,
-            temperature,
+            temperature: effective_temperature,
             stream: Some(options.enabled),
             tools: None,
             tool_choice: None,
@@ -1760,7 +1800,7 @@ mod tests {
                     content: MessageContent::Text("hello".to_string()),
                 },
             ],
-            temperature: 0.4,
+            temperature: Some(0.4),
             stream: Some(false),
             tools: None,
             tool_choice: None,
@@ -2473,7 +2513,7 @@ mod tests {
                 role: "user".to_string(),
                 content: MessageContent::Text("What is the weather?".to_string()),
             }],
-            temperature: 0.7,
+            temperature: Some(0.7),
             stream: Some(false),
             tools: Some(tools),
             tool_choice: Some("auto".to_string()),
