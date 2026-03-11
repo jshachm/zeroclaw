@@ -146,6 +146,16 @@ impl ApprovalManager {
             })
     }
 
+    /// Resolve approval by ID and return response
+    pub fn resolve_approval(&self, id: &str, approved: bool) -> bool {
+        let response = if approved {
+            ApprovalResponse::Yes
+        } else {
+            ApprovalResponse::No
+        };
+        self.resolve_pending_approval(id, response)
+    }
+
     /// Check whether a tool call requires interactive approval.
     ///
     /// Returns `true` if the call needs a prompt, `false` if it can proceed.

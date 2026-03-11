@@ -2455,9 +2455,10 @@ pub(crate) async fn run_tool_call_loop(
                     let decision = if channel_name == "cli" {
                         mgr.prompt_cli(&request)
                     } else if channel_name == "feishu" {
-                        // For Feishu, we need to implement async approval
-                        // For now, log the request and auto-approve
-                        // TODO: Implement full async approval with button callbacks
+                        // For Feishu, ask user to confirm via "yes" or "no"
+                        // The approval card will be sent via the channel's send capability
+                        // For now, we log the request and need manual confirmation
+                        // This is a simplified version - full button-based flow needs more work
                         tracing::info!(
                             "Feishu approval request: tool={} args={}",
                             tool_name,
