@@ -2463,8 +2463,8 @@ pub(crate) async fn run_tool_call_loop(
                         } else {
                             tool_args_str
                         };
-                        tracing::info!(
-                            "Feishu approval request: tool={} args={}",
+                        tracing::error!(
+                            "🔐 Feishu APPROVAL REQUEST: tool={} args={}",
                             tool_name,
                             truncated_args
                         );
