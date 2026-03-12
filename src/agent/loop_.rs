@@ -2456,6 +2456,10 @@ pub(crate) async fn run_tool_call_loop(
                     };
 
                     // For Feishu, send interactive approval request
+                    eprintln!(
+                        "[DEBUG] Feishu approval check: channel={} tool={}",
+                        channel_name, tool_name
+                    );
                     tracing::error!(
                         "🔍 DEBUG: channel_name={} tool_name={}",
                         channel_name,
