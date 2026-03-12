@@ -2533,6 +2533,36 @@ pub(crate) async fn run_tool_call_loop(
                     } else {
                         ApprovalResponse::Yes
                     };
+
+                    // If approval was denied, skip this tool execution
+                    if decision == ApprovalResponse::No {
+                        let denied = "Denied by user.".to_string();
+                        runtime_trace::record_event(
+                            "tool_call_result",
+                            Some(channel_name),
+                            Some(provider_name),
+                            Some(model),
+                            Some(&turn_id),
+                            Some(false),
+                            Some(&denied),
+                            serde_json::json!({
+                                "iteration": iteration + 1,
+                                "tool": tool_name.clone(),
+                                "arguments": scrub_credentials(&tool_args.to_string()),
+                            }),
+                        );
+                        ordered_results[idx] = Some((
+                            tool_name.clone(),
+                            call.tool_call_id.clone(),
+                            ToolExecutionOutcome {
+                                output: denied.clone(),
+                                success: false,
+                                error_reason: Some(denied),
+                                duration: Duration::ZERO,
+                            },
+                        ));
+                        continue;
+                    }
                 }
             }
 
