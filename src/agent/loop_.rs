@@ -2468,8 +2468,11 @@ pub(crate) async fn run_tool_call_loop(
                     let decision = if channel_name == "cli" {
                         mgr.prompt_cli(&request)
                     } else if channel_name == "feishu" {
-                        // For Feishu, log the request and auto-approve for now
-                        // User can reply "yes" or "no" to confirm (handled by lark.rs)
+                        // For Feishu, create pending approval and wait for user response
+                        use crate::approval::global_pending_approvals;
+                        use std::time::Duration;
+                        use tokio::sync::oneshot;
+
                         let tool_args_str = serde_json::to_string(&tool_args).unwrap_or_default();
                         let truncated_args = if tool_args_str.len() > 200 {
                             format!("{}...", &tool_args_str[..200])
@@ -2482,10 +2485,7 @@ pub(crate) async fn run_tool_call_loop(
                             truncated_args
                         );
 
-                        // Import and use the global pending approval function
-                        use crate::approval::global_pending_approvals;
-                        use tokio::sync::oneshot;
-                        let (tx, _rx) = oneshot::channel();
+                        let (tx, mut rx) = oneshot::channel();
                         let id = uuid::Uuid::new_v4().to_string();
                         let pending = crate::approval::PendingApproval {
                             id: id.clone(),
@@ -2496,41 +2496,43 @@ pub(crate) async fn run_tool_call_loop(
                         };
                         global_pending_approvals().lock().insert(id, pending);
 
-                        ApprovalResponse::Yes
+                        // Notify about pending approval request
+                        crate::approval::notify_approval_request(
+                            &tool_name,
+                            &truncated_args,
+                            channel_name,
+                        );
+
+                        // Wait for user response with timeout (5 minutes)
+                        let response =
+                            tokio::time::timeout(Duration::from_secs(300), &mut rx).await;
+
+                        match response {
+                            Ok(Ok(approved)) => {
+                                tracing::info!(
+                                    "Feishu approval decision: {}",
+                                    if approved == crate::approval::ApprovalResponse::Yes {
+                                        "approved"
+                                    } else {
+                                        "denied"
+                                    }
+                                );
+                                approved
+                            }
+                            Ok(Err(_)) => {
+                                tracing::warn!(
+                                    "Feishu approval channel closed, defaulting to deny"
+                                );
+                                crate::approval::ApprovalResponse::No
+                            }
+                            Err(_) => {
+                                tracing::warn!("Feishu approval timed out, defaulting to deny");
+                                crate::approval::ApprovalResponse::No
+                            }
+                        }
                     } else {
                         ApprovalResponse::Yes
                     };
-
-                    mgr.record_decision(&tool_name, &tool_args, decision, channel_name);
-
-                    if decision == ApprovalResponse::No {
-                        let denied = "Denied by user.".to_string();
-                        runtime_trace::record_event(
-                            "tool_call_result",
-                            Some(channel_name),
-                            Some(provider_name),
-                            Some(model),
-                            Some(&turn_id),
-                            Some(false),
-                            Some(&denied),
-                            serde_json::json!({
-                                "iteration": iteration + 1,
-                                "tool": tool_name.clone(),
-                                "arguments": scrub_credentials(&tool_args.to_string()),
-                            }),
-                        );
-                        ordered_results[idx] = Some((
-                            tool_name.clone(),
-                            call.tool_call_id.clone(),
-                            ToolExecutionOutcome {
-                                output: denied.clone(),
-                                success: false,
-                                error_reason: Some(denied),
-                                duration: Duration::ZERO,
-                            },
-                        ));
-                        continue;
-                    }
                 }
             }
 

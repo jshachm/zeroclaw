@@ -594,6 +594,14 @@ impl LarkChannel {
         let (mut write, mut read) = ws_stream.split();
         tracing::info!("Lark: WS connected (service_id={service_id})");
 
+        // Register approval notifier callback (logs only for now)
+        let _channel_clone = self.clone();
+        crate::approval::register_approval_notifier(move |tool_name, args, channel| {
+            if channel == "feishu" {
+                tracing::info!("Feishu approval request created: {} - {}", tool_name, args);
+            }
+        });
+
         let mut ping_secs = client_config.ping_interval.unwrap_or(120).max(10);
         let mut hb_interval = tokio::time::interval(Duration::from_secs(ping_secs));
         let mut timeout_check = tokio::time::interval(Duration::from_secs(10));
@@ -853,6 +861,20 @@ impl LarkChannel {
                             .as_secs(),
                         thread_ts: None,
                     };
+
+                    // Check if there's a pending approval request - if so, send approval request first
+                    let pending_approvals = crate::approval::global_pending_approvals();
+                    let has_pending = !pending_approvals.lock().is_empty();
+                    if has_pending {
+                        let approval_msg = "🔐 **需要审批**\n\n有工具正在等待您的批准。\n请回复 `yes` 批准 或 `no` 拒绝";
+                        let _ = crate::channels::Channel::send(
+                            self,
+                            &crate::channels::traits::SendMessage::new(
+                                approval_msg.to_string(),
+                                &lark_msg.chat_id,
+                            ),
+                        ).await;
+                    }
 
                     tracing::debug!("Lark WS: message in {}", lark_msg.chat_id);
                     if tx.send(channel_msg).await.is_err() { break; }

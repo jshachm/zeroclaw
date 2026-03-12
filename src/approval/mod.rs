@@ -20,6 +20,27 @@ use tokio::sync::oneshot;
 static PENDING_APPROVALS: std::sync::LazyLock<Arc<Mutex<HashMap<String, PendingApproval>>>> =
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
+/// Global callback for notifying about pending approval requests
+/// Arguments: tool_name, arguments, channel
+static APPROVAL_NOTIFIER: std::sync::LazyLock<
+    Arc<Mutex<Option<Box<dyn Fn(String, String, String) + Send + Sync>>>>,
+> = std::sync::LazyLock::new(|| Arc::new(Mutex::new(None)));
+
+/// Register a callback to be notified when approval is needed
+pub fn register_approval_notifier<F>(callback: F)
+where
+    F: Fn(String, String, String) + Send + Sync + 'static,
+{
+    *APPROVAL_NOTIFIER.lock() = Some(Box::new(callback));
+}
+
+/// Notify about a pending approval request
+pub fn notify_approval_request(tool_name: &str, args: &str, channel: &str) {
+    if let Some(callback) = APPROVAL_NOTIFIER.lock().as_ref() {
+        callback(tool_name.to_string(), args.to_string(), channel.to_string());
+    }
+}
+
 /// Get global pending approvals storage
 pub fn global_pending_approvals() -> Arc<Mutex<HashMap<String, PendingApproval>>> {
     Arc::clone(&PENDING_APPROVALS)
