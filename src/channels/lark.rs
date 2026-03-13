@@ -1332,18 +1332,12 @@ impl Channel for LarkChannel {
         // If conversion fails or produces invalid format, fall back to plain text
         let post_content = markdown_to_lark_post_safe(&message.content);
 
-        // Build body manually to ensure content is a proper JSON string
-        let body_str = format!(
-            r#"{{"receive_id":"{}","msg_type":"post","content":{}}}"#,
-            message.recipient,
-            serde_json::Value::String(post_content)
-        );
-        let body: serde_json::Value = serde_json::from_str(&body_str).unwrap_or_else(|_| {
-            serde_json::json!({
-                "receive_id": message.recipient,
-                "msg_type": "text",
-                "content": serde_json::json!({"text": message.content}).to_string()
-            })
+        // Lark post content must be a JSON STRING, not an object
+        // The content field should contain: "{\"zh_cn\":{...}}"
+        let body = serde_json::json!({
+            "receive_id": message.recipient,
+            "msg_type": "post",
+            "content": post_content,
         });
 
         let (status, response) = self.send_text_once(&url, &token, &body).await?;
@@ -2095,10 +2089,12 @@ fn markdown_to_lark_post_safe(markdown: &str) -> String {
             if in_code_block {
                 // End of code block
                 let code_text = code_lines.join("\n");
-                content.push(vec![serde_json::json!({
-                    "tag": "text",
-                    "text": code_text,
-                })]);
+                if !code_text.is_empty() {
+                    content.push(vec![serde_json::json!({
+                        "tag": "text",
+                        "text": code_text,
+                    })]);
+                }
                 code_lines.clear();
                 in_code_block = false;
             } else {
@@ -2122,6 +2118,12 @@ fn markdown_to_lark_post_safe(markdown: &str) -> String {
         let elements = parse_markdown_line_simple(line);
         if !elements.is_empty() {
             content.push(elements);
+        } else {
+            // If no elements parsed, add the whole line as plain text
+            content.push(vec![serde_json::json!({
+                "tag": "text",
+                "text": line,
+            })]);
         }
     }
 
@@ -2134,14 +2136,24 @@ fn markdown_to_lark_post_safe(markdown: &str) -> String {
         })]);
     }
 
-    // Build final JSON
+    // Ensure content is not empty
+    if content.is_empty() {
+        content.push(vec![serde_json::json!({
+            "tag": "text",
+            "text": markdown,
+        })]);
+    }
+
+    // Build final JSON - ensure content is a valid array of arrays
     let post_obj = serde_json::json!({
         "zh_cn": {
             "content": content
         }
     });
 
-    post_obj.to_string()
+    let result = post_obj.to_string();
+    tracing::debug!("Generated Lark post content: {}", result);
+    result
 }
 
 /// Parse a single line with simple inline formatting
