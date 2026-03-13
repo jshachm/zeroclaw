@@ -1340,6 +1340,12 @@ impl Channel for LarkChannel {
             "content": post_content,
         });
 
+        tracing::info!(
+            "Sending Lark post message. Content: {}, Body: {:?}",
+            post_content,
+            body
+        );
+
         let (status, response) = self.send_text_once(&url, &token, &body).await?;
 
         if status.as_u16() == 400 {
