@@ -1328,15 +1328,49 @@ impl Channel for LarkChannel {
         let token = self.get_tenant_access_token().await?;
         let url = self.send_message_url();
 
-        // Use plain text for reliability
-        let content = serde_json::json!({ "text": message.content }).to_string();
+        // Try to convert markdown to Lark post format for better display
+        // If conversion fails or produces invalid format, fall back to plain text
+        let post_content = markdown_to_lark_post_safe(&message.content);
         let body = serde_json::json!({
             "receive_id": message.recipient,
-            "msg_type": "text",
-            "content": content,
+            "msg_type": "post",
+            "content": post_content,
         });
 
         let (status, response) = self.send_text_once(&url, &token, &body).await?;
+
+        if status.as_u16() == 400 {
+            // Post format failed, fallback to plain text
+            tracing::warn!("Post message failed, falling back to plain text");
+            let content = serde_json::json!({ "text": message.content }).to_string();
+            let text_body = serde_json::json!({
+                "receive_id": message.recipient,
+                "msg_type": "text",
+                "content": content,
+            });
+
+            let (text_status, text_response) =
+                self.send_text_once(&url, &token, &text_body).await?;
+
+            if should_refresh_lark_tenant_token(text_status, &text_response) {
+                self.invalidate_token().await;
+                let new_token = self.get_tenant_access_token().await?;
+                let (retry_status, retry_response) =
+                    self.send_text_once(&url, &new_token, &text_body).await?;
+
+                if should_refresh_lark_tenant_token(retry_status, &retry_response) {
+                    anyhow::bail!(
+                        "Lark send failed after token refresh: status={retry_status}, body={retry_response}"
+                    );
+                }
+
+                ensure_lark_send_success(retry_status, &retry_response, "after token refresh")?;
+                return Ok(());
+            }
+
+            ensure_lark_send_success(text_status, &text_response, "without token refresh")?;
+            return Ok(());
+        }
 
         if should_refresh_lark_tenant_token(status, &response) {
             // Token expired/invalid, invalidate and retry once.
@@ -2029,6 +2063,112 @@ fn process_markdown_line(line: &str) -> Vec<serde_json::Value> {
             "tag": "text",
             "text": current_text,
         }));
+    }
+
+    elements
+}
+
+/// Safe version: Convert Markdown to Lark post format with error handling
+/// Only processes basic formatting to avoid complex nested structures
+fn markdown_to_lark_post_safe(markdown: &str) -> String {
+    // Split into lines and process each
+    let lines: Vec<&str> = markdown.lines().collect();
+    let mut content: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut in_code_block = false;
+    let mut code_lines: Vec<String> = Vec::new();
+
+    for line in lines {
+        // Handle code blocks
+        if line.starts_with("```") {
+            if in_code_block {
+                // End of code block
+                let code_text = code_lines.join("\n");
+                content.push(vec![serde_json::json!({
+                    "tag": "text",
+                    "text": code_text,
+                })]);
+                code_lines.clear();
+                in_code_block = false;
+            } else {
+                // Start of code block
+                in_code_block = true;
+            }
+            continue;
+        }
+
+        if in_code_block {
+            code_lines.push(line.to_string());
+            continue;
+        }
+
+        // Skip empty lines
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Process regular line
+        let elements = parse_markdown_line_simple(line);
+        if !elements.is_empty() {
+            content.push(elements);
+        }
+    }
+
+    // Handle remaining code block
+    if in_code_block && !code_lines.is_empty() {
+        let code_text = code_lines.join("\n");
+        content.push(vec![serde_json::json!({
+            "tag": "text",
+            "text": code_text,
+        })]);
+    }
+
+    // Build final JSON
+    let post_obj = serde_json::json!({
+        "zh_cn": {
+            "content": content
+        }
+    });
+
+    post_obj.to_string()
+}
+
+/// Parse a single line with simple inline formatting
+fn parse_markdown_line_simple(line: &str) -> Vec<serde_json::Value> {
+    let mut elements: Vec<serde_json::Value> = Vec::new();
+
+    // Check for headers and extract
+    let text = if line.starts_with("# ") {
+        line[2..].to_string()
+    } else if line.starts_with("## ") {
+        line[3..].to_string()
+    } else if line.starts_with("### ") {
+        line[4..].to_string()
+    } else {
+        line.to_string()
+    };
+
+    // Process inline bold: **text**
+    let parts: Vec<&str> = text.split("**").collect();
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+
+        // Odd indices are bold text
+        let is_bold = i % 2 == 1;
+
+        if is_bold {
+            elements.push(serde_json::json!({
+                "tag": "text",
+                "text": part,
+                "style": {"bold": true}
+            }));
+        } else {
+            elements.push(serde_json::json!({
+                "tag": "text",
+                "text": part,
+            }));
+        }
     }
 
     elements
