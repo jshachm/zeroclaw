@@ -617,18 +617,21 @@ impl LarkChannel {
 
                 if !chat_id.is_empty() {
                     let ch = channel_clone.clone();
-                    let tool_name = tool_name.clone();
-                    let args = args.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = ch.send_approval_card(&chat_id, &tool_name, &args).await {
-                            tracing::error!("Failed to send approval card: {}", e);
-                        }
-                    });
+                    let tool_name_for_spawn = tool_name.clone();
+                    let args_for_spawn = args.clone();
                     tracing::info!(
-                        "Sent approval card to chat {} for tool {}",
+                        "Sending approval card to chat {} for tool {}",
                         chat_id,
                         tool_name
                     );
+                    tokio::spawn(async move {
+                        if let Err(e) = ch
+                            .send_approval_card(&chat_id, &tool_name_for_spawn, &args_for_spawn)
+                            .await
+                        {
+                            tracing::error!("Failed to send approval card: {}", e);
+                        }
+                    });
                 } else {
                     tracing::warn!(
                         "No chat_id available for approval request: {} - {}",
@@ -778,6 +781,59 @@ impl LarkChannel {
                         Ok(e) => e,
                         Err(e) => { tracing::error!("Lark: event JSON: {e}"); continue; }
                     };
+
+                    // Handle card action trigger (interactive card button clicks)
+                    if event.header.event_type == "card.action.trigger" {
+                        tracing::info!("Received card action trigger event");
+                        if let Some(action_data) = event.event.get("action") {
+                            let action_value = action_data.get("value");
+                            let action_type = action_value
+                                .and_then(|v| v.get("action"))
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("");
+                            let tool_name = action_value
+                                .and_then(|v| v.get("tool"))
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("");
+
+                            tracing::info!("Card action: {} for tool: {}", action_type, tool_name);
+
+                            let approved = action_type == "approve";
+
+                            // Resolve the pending approval
+                            use crate::approval::resolve_pending_by_tool_name;
+                            if resolve_pending_by_tool_name(tool_name, approved) {
+                                // Send confirmation message
+                                let confirm_msg = if approved {
+                                    "✅ 已批准执行"
+                                } else {
+                                    "❌ 已拒绝执行"
+                                };
+
+                                // Get chat_id from context
+                                let chat_id = current_chat_id
+                                    .read()
+                                    .ok()
+                                    .and_then(|g| g.clone())
+                                    .unwrap_or_default();
+
+                                if !chat_id.is_empty() {
+                                    let channel_for_send = self.clone();
+                                    tokio::spawn(async move {
+                                        let _ = crate::channels::Channel::send(
+                                            &channel_for_send,
+                                            &crate::channels::traits::SendMessage::new(
+                                                confirm_msg.to_string(),
+                                                &chat_id,
+                                            ),
+                                        ).await;
+                                    });
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
                     if event.header.event_type != "im.message.receive_v1" { continue; }
 
                     let event_payload = event.event;
