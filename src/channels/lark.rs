@@ -1328,12 +1328,12 @@ impl Channel for LarkChannel {
         let token = self.get_tenant_access_token().await?;
         let url = self.send_message_url();
 
-        // Convert markdown to Lark rich text (post) format for better display
-        let post_content = markdown_to_lark_post(&message.content);
+        // Use plain text for reliability
+        let content = serde_json::json!({ "text": message.content }).to_string();
         let body = serde_json::json!({
             "receive_id": message.recipient,
-            "msg_type": "post",
-            "content": post_content,
+            "msg_type": "text",
+            "content": content,
         });
 
         let (status, response) = self.send_text_once(&url, &token, &body).await?;
