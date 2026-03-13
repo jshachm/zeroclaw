@@ -1330,17 +1330,22 @@ impl Channel for LarkChannel {
 
         // Try to convert markdown to Lark post format for better display
         // If conversion fails or produces invalid format, fall back to plain text
-        let post_content_str = markdown_to_lark_post_safe(&message.content);
+        let post_content = markdown_to_lark_post_safe(&message.content);
 
-        // Parse post content as JSON Value - Lark expects content to be an object, not a string
-        let post_content: serde_json::Value = match serde_json::from_str(&post_content_str) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!(
-                    "Failed to parse post content: {}, error: {}",
-                    post_content_str,
-                    e
-                );
+        // IMPORTANT: Lark/飞书 API requires content to be a JSON STRING, not a JSON object!
+        // The content field must be a string containing escaped JSON like:
+        // "{\"zh_cn\":{\"content\":[[{\"tag\":\"text\",\"text\":\"...\"}]]}}"
+        let body = serde_json::json!({
+            "receive_id": message.recipient,
+            "msg_type": "post",
+            "content": post_content,
+        });
+
+        tracing::info!(
+            "Sending Lark post message. Content: {}, Body: {:?}",
+            post_content,
+            body
+        );
                 // Fallback to plain text
                 let content = serde_json::json!({ "text": message.content }).to_string();
                 let text_body = serde_json::json!({
