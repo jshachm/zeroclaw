@@ -1333,8 +1333,7 @@ impl Channel for LarkChannel {
         let post_content = markdown_to_lark_post_safe(&message.content);
 
         // IMPORTANT: Lark/飞书 API requires content to be a JSON STRING, not a JSON object!
-        // The content field must be a string containing escaped JSON like:
-        // "{\"zh_cn\":{\"content\":[[{\"tag\":\"text\",\"text\":\"...\"}]]}}"
+        // The content field must be a string containing escaped JSON
         let body = serde_json::json!({
             "receive_id": message.recipient,
             "msg_type": "post",
@@ -1344,50 +1343,6 @@ impl Channel for LarkChannel {
         tracing::info!(
             "Sending Lark post message. Content: {}, Body: {:?}",
             post_content,
-            body
-        );
-                // Fallback to plain text
-                let content = serde_json::json!({ "text": message.content }).to_string();
-                let text_body = serde_json::json!({
-                    "receive_id": message.recipient,
-                    "msg_type": "text",
-                    "content": content,
-                });
-
-                let (text_status, text_response) =
-                    self.send_text_once(&url, &token, &text_body).await?;
-
-                if should_refresh_lark_tenant_token(text_status, &text_response) {
-                    self.invalidate_token().await;
-                    let new_token = self.get_tenant_access_token().await?;
-                    let (retry_status, retry_response) =
-                        self.send_text_once(&url, &new_token, &text_body).await?;
-
-                    if should_refresh_lark_tenant_token(retry_status, &retry_response) {
-                        anyhow::bail!(
-                            "Lark send failed after token refresh: status={retry_status}, body={retry_response}"
-                        );
-                    }
-
-                    ensure_lark_send_success(retry_status, &retry_response, "after token refresh")?;
-                    return Ok(());
-                }
-
-                ensure_lark_send_success(text_status, &text_response, "without token refresh")?;
-                return Ok(());
-            }
-        };
-
-        // Lark expects content to be a JSON object, not a string
-        let body = serde_json::json!({
-            "receive_id": message.recipient,
-            "msg_type": "post",
-            "content": post_content,
-        });
-
-        tracing::info!(
-            "Sending Lark post message. Content: {}, Body: {:?}",
-            post_content_str,
             body
         );
 
