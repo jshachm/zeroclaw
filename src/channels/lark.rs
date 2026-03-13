@@ -1328,11 +1328,12 @@ impl Channel for LarkChannel {
         let token = self.get_tenant_access_token().await?;
         let url = self.send_message_url();
 
-        let content = serde_json::json!({ "text": message.content }).to_string();
+        // Convert markdown to Lark rich text (post) format for better display
+        let post_content = markdown_to_lark_post(&message.content);
         let body = serde_json::json!({
             "receive_id": message.recipient,
-            "msg_type": "text",
-            "content": content,
+            "msg_type": "post",
+            "content": post_content,
         });
 
         let (status, response) = self.send_text_once(&url, &token, &body).await?;
@@ -1845,6 +1846,220 @@ fn parse_post_content_details(content: &str) -> Option<ParsedPostContent> {
 
 fn parse_post_content(content: &str) -> Option<String> {
     parse_post_content_details(content).map(|details| details.text)
+}
+
+/// Convert Markdown to Lark rich text (post) format.
+/// Supports: **bold**, *italic*, `code`, # headers, lists
+fn markdown_to_lark_post(markdown: &str) -> String {
+    let mut paragraphs: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut current_paragraph: Vec<serde_json::Value> = Vec::new();
+    let mut in_code_block = false;
+    let mut code_block_content = String::new();
+
+    for line in markdown.lines() {
+        // Handle code blocks
+        if line.starts_with("```") {
+            if in_code_block {
+                // End of code block
+                if !current_paragraph.is_empty() {
+                    paragraphs.push(current_paragraph.clone());
+                    current_paragraph.clear();
+                }
+                paragraphs.push(vec![serde_json::json!({
+                    "tag": "text",
+                    "text": code_block_content.trim_end(),
+                    "style": {"bold": false}
+                })]);
+                code_block_content.clear();
+                in_code_block = false;
+            } else {
+                // Start of code block
+                if !current_paragraph.is_empty() {
+                    paragraphs.push(current_paragraph.clone());
+                    current_paragraph.clear();
+                }
+                in_code_block = true;
+            }
+            continue;
+        }
+
+        if in_code_block {
+            code_block_content.push_str(line);
+            code_block_content.push('\n');
+            continue;
+        }
+
+        // Skip empty lines, but push current paragraph
+        if line.trim().is_empty() {
+            if !current_paragraph.is_empty() {
+                paragraphs.push(current_paragraph.clone());
+                current_paragraph.clear();
+            }
+            continue;
+        }
+
+        // Process the line
+        let processed_line = process_markdown_line(line);
+        for element in processed_line {
+            current_paragraph.push(element);
+        }
+    }
+
+    // Handle remaining content
+    if in_code_block && !code_block_content.is_empty() {
+        paragraphs.push(vec![serde_json::json!({
+            "tag": "text",
+            "text": code_block_content.trim_end(),
+            "style": {"bold": false}
+        })]);
+    } else if !current_paragraph.is_empty() {
+        paragraphs.push(current_paragraph);
+    }
+
+    // Extract title from first heading if present
+    let title = paragraphs
+        .first()
+        .and_then(|p| p.first())
+        .and_then(|e| e.get("text"))
+        .and_then(|t| t.as_str())
+        .filter(|t| t.starts_with('#'))
+        .map(|t| t.trim_start_matches('#').trim().to_string())
+        .unwrap_or_default();
+
+    // Build post content
+    let post_obj = if title.is_empty() {
+        serde_json::json!({
+            "zh_cn": {
+                "content": paragraphs
+            }
+        })
+    } else {
+        serde_json::json!({
+            "zh_cn": {
+                "title": title,
+                "content": paragraphs
+            }
+        })
+    };
+
+    post_obj.to_string()
+}
+
+/// Process a single line of markdown, converting inline formatting
+fn process_markdown_line(line: &str) -> Vec<serde_json::Value> {
+    let mut elements: Vec<serde_json::Value> = Vec::new();
+    let mut current_text = String::new();
+    let mut chars = line.chars().peekable();
+
+    // Check for headers
+    let is_header = line.starts_with('#');
+    let header_level = if is_header {
+        line.chars().take_while(|c| *c == '#').count()
+    } else {
+        0
+    };
+
+    if is_header {
+        // Skip the # characters
+        for _ in 0..header_level {
+            chars.next();
+        }
+        // Skip space after #
+        if chars.peek() == Some(&' ') {
+            chars.next();
+        }
+    }
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' if chars.peek() == Some(&'*') => {
+                // Bold **text**
+                chars.next(); // consume second *
+                if !current_text.is_empty() {
+                    elements.push(create_text_element(&current_text, false, is_header));
+                    current_text.clear();
+                }
+
+                // Collect bold text
+                let mut bold_text = String::new();
+                while let Some(c) = chars.next() {
+                    if c == '*' && chars.peek() == Some(&'*') {
+                        chars.next(); // consume second *
+                        break;
+                    }
+                    bold_text.push(c);
+                }
+                if !bold_text.is_empty() {
+                    elements.push(create_text_element(&bold_text, true, false));
+                }
+            }
+            '*' => {
+                // Italic *text*
+                if !current_text.is_empty() {
+                    elements.push(create_text_element(&current_text, false, is_header));
+                    current_text.clear();
+                }
+
+                // Collect italic text
+                let mut italic_text = String::new();
+                while let Some(c) = chars.next() {
+                    if c == '*' {
+                        break;
+                    }
+                    italic_text.push(c);
+                }
+                if !italic_text.is_empty() {
+                    // Italic is represented as non-bold in Lark (or could use underline)
+                    elements.push(create_text_element(&italic_text, false, false));
+                }
+            }
+            '`' => {
+                // Inline code `text`
+                if !current_text.is_empty() {
+                    elements.push(create_text_element(&current_text, false, is_header));
+                    current_text.clear();
+                }
+
+                // Collect code text
+                let mut code_text = String::new();
+                while let Some(c) = chars.next() {
+                    if c == '`' {
+                        break;
+                    }
+                    code_text.push(c);
+                }
+                if !code_text.is_empty() {
+                    // Code shown as bold with different styling
+                    elements.push(serde_json::json!({
+                        "tag": "text",
+                        "text": code_text,
+                        "style": {"bold": true}
+                    }));
+                }
+            }
+            _ => {
+                current_text.push(ch);
+            }
+        }
+    }
+
+    // Add remaining text
+    if !current_text.is_empty() {
+        elements.push(create_text_element(&current_text, false, is_header));
+    }
+
+    elements
+}
+
+/// Create a text element with optional bold and header styling
+fn create_text_element(text: &str, bold: bool, is_header: bool) -> serde_json::Value {
+    serde_json::json!({
+        "tag": "text",
+        "text": text,
+        "style": {
+            "bold": bold || is_header
+        }
+    })
 }
 
 /// Remove `@_user_N` placeholder tokens injected by Feishu in group chats.
