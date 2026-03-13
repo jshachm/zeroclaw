@@ -1891,6 +1891,7 @@ pub(crate) async fn agent_turn(
         None,
         None,
         &[],
+        None,
     )
     .await
 }
@@ -2085,6 +2086,7 @@ pub(crate) async fn run_tool_call_loop(
     on_delta: Option<tokio::sync::mpsc::Sender<String>>,
     hooks: Option<&crate::hooks::HookRunner>,
     excluded_tools: &[String],
+    reply_target: Option<&str>,
 ) -> Result<String> {
     let max_iterations = if max_tool_iterations == 0 {
         DEFAULT_MAX_TOOL_ITERATIONS
@@ -2455,36 +2457,21 @@ pub(crate) async fn run_tool_call_loop(
                         arguments: tool_args.clone(),
                     };
 
-                    // For Feishu, send interactive approval request
-                    eprintln!(
-                        "[DEBUG] Feishu approval check: channel={} tool={}",
-                        channel_name, tool_name
-                    );
-                    tracing::error!(
-                        "🔍 DEBUG: channel_name={} tool_name={}",
-                        channel_name,
-                        tool_name
-                    );
-                    let decision = if channel_name == "cli" {
-                        mgr.prompt_cli(&request)
-                    } else if channel_name == "feishu" {
-                        // For Feishu, create pending approval and wait for user response
+                    // For Feishu, BLOCK and wait for user approval
+                    if channel_name == "feishu" {
                         use crate::approval::global_pending_approvals;
+                        use crate::approval::notify_approval_request;
                         use std::time::Duration;
                         use tokio::sync::oneshot;
 
                         let tool_args_str = serde_json::to_string(&tool_args).unwrap_or_default();
-                        let truncated_args = if tool_args_str.len() > 200 {
-                            format!("{}...", &tool_args_str[..200])
-                        } else {
-                            tool_args_str
-                        };
+
                         tracing::error!(
-                            "🔐 Feishu APPROVAL REQUEST: tool={} args={}",
-                            tool_name,
-                            truncated_args
+                            "🔐 BLOCKING: waiting for Feishu approval for tool={}",
+                            tool_name
                         );
 
+                        // Create pending approval with response channel
                         let (tx, mut rx) = oneshot::channel();
                         let id = uuid::Uuid::new_v4().to_string();
                         let pending = crate::approval::PendingApproval {
@@ -2496,72 +2483,65 @@ pub(crate) async fn run_tool_call_loop(
                         };
                         global_pending_approvals().lock().insert(id, pending);
 
-                        // Notify about pending approval request
-                        crate::approval::notify_approval_request(
-                            &tool_name,
-                            &truncated_args,
-                            channel_name,
-                        );
+                        // Notify about pending approval (pass reply_target as context for Feishu)
+                        let context = reply_target.unwrap_or("");
+                        notify_approval_request(&tool_name, &tool_args_str, channel_name, context);
 
-                        // Wait for user response with timeout (5 minutes)
-                        let response =
-                            tokio::time::timeout(Duration::from_secs(300), &mut rx).await;
+                        // BLOCK here waiting for user response (max 5 minutes)
+                        let decision =
+                            match tokio::time::timeout(Duration::from_secs(300), &mut rx).await {
+                                Ok(Ok(approved)) => {
+                                    tracing::info!(
+                                        "Feishu approval: {}",
+                                        if approved == crate::approval::ApprovalResponse::Yes {
+                                            "approved"
+                                        } else {
+                                            "denied"
+                                        }
+                                    );
+                                    approved
+                                }
+                                Ok(Err(_)) => {
+                                    tracing::warn!("Approval channel closed");
+                                    crate::approval::ApprovalResponse::No
+                                }
+                                Err(_) => {
+                                    tracing::warn!("Approval timed out");
+                                    crate::approval::ApprovalResponse::No
+                                }
+                            };
 
-                        match response {
-                            Ok(Ok(approved)) => {
-                                tracing::info!(
-                                    "Feishu approval decision: {}",
-                                    if approved == crate::approval::ApprovalResponse::Yes {
-                                        "approved"
-                                    } else {
-                                        "denied"
-                                    }
-                                );
-                                approved
-                            }
-                            Ok(Err(_)) => {
-                                tracing::warn!(
-                                    "Feishu approval channel closed, defaulting to deny"
-                                );
-                                crate::approval::ApprovalResponse::No
-                            }
-                            Err(_) => {
-                                tracing::warn!("Feishu approval timed out, defaulting to deny");
-                                crate::approval::ApprovalResponse::No
-                            }
+                        // If denied, return error
+                        if decision == crate::approval::ApprovalResponse::No {
+                            ordered_results[idx] = Some((
+                                tool_name.clone(),
+                                call.tool_call_id.clone(),
+                                ToolExecutionOutcome {
+                                    output: "❌ 用户拒绝执行".to_string(),
+                                    success: false,
+                                    error_reason: Some("用户拒绝".to_string()),
+                                    duration: Duration::ZERO,
+                                },
+                            ));
+                            continue;
                         }
-                    } else {
-                        ApprovalResponse::Yes
-                    };
-
-                    // If approval was denied, skip this tool execution
-                    if decision == ApprovalResponse::No {
-                        let denied = "Denied by user.".to_string();
-                        runtime_trace::record_event(
-                            "tool_call_result",
-                            Some(channel_name),
-                            Some(provider_name),
-                            Some(model),
-                            Some(&turn_id),
-                            Some(false),
-                            Some(&denied),
-                            serde_json::json!({
-                                "iteration": iteration + 1,
-                                "tool": tool_name.clone(),
-                                "arguments": scrub_credentials(&tool_args.to_string()),
-                            }),
-                        );
-                        ordered_results[idx] = Some((
-                            tool_name.clone(),
-                            call.tool_call_id.clone(),
-                            ToolExecutionOutcome {
-                                output: denied.clone(),
-                                success: false,
-                                error_reason: Some(denied),
-                                duration: Duration::ZERO,
-                            },
-                        ));
-                        continue;
+                        // If approved, continue to execute the tool normally
+                        // Skip the general approval logic below for Feishu
+                    } else if channel_name == "cli" {
+                        let decision = mgr.prompt_cli(&request);
+                        if decision == ApprovalResponse::No {
+                            ordered_results[idx] = Some((
+                                tool_name.clone(),
+                                call.tool_call_id.clone(),
+                                ToolExecutionOutcome {
+                                    output: "User denied tool execution".to_string(),
+                                    success: false,
+                                    error_reason: Some("User denied".to_string()),
+                                    duration: Duration::ZERO,
+                                },
+                            ));
+                            continue;
+                        }
                     }
                 }
             }
@@ -3112,6 +3092,7 @@ pub async fn run(
             None,
             None,
             &[],
+            None,
         )
         .await?;
         final_output = response.clone();
@@ -3234,6 +3215,7 @@ pub async fn run(
                 None,
                 None,
                 &[],
+                None,
             )
             .await
             {
@@ -3778,6 +3760,7 @@ mod tests {
             None,
             None,
             &[],
+            None,
         )
         .await
         .expect_err("provider without vision support should fail");
@@ -3824,6 +3807,7 @@ mod tests {
             None,
             None,
             &[],
+            None,
         )
         .await
         .expect_err("oversized payload must fail");
@@ -3864,6 +3848,7 @@ mod tests {
             None,
             None,
             &[],
+            None,
         )
         .await
         .expect("valid multimodal payload should pass");
@@ -3990,6 +3975,7 @@ mod tests {
             None,
             None,
             &[],
+            None,
         )
         .await
         .expect("parallel execution should complete");
@@ -4059,6 +4045,7 @@ mod tests {
             None,
             None,
             &[],
+            None,
         )
         .await
         .expect("loop should finish after deduplicating repeated calls");
@@ -4115,6 +4102,7 @@ mod tests {
             None,
             None,
             &[],
+            None,
         )
         .await
         .expect("native fallback id flow should complete");

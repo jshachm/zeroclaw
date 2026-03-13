@@ -594,11 +594,48 @@ impl LarkChannel {
         let (mut write, mut read) = ws_stream.split();
         tracing::info!("Lark: WS connected (service_id={service_id})");
 
-        // Register approval notifier callback (logs only for now)
-        let _channel_clone = self.clone();
-        crate::approval::register_approval_notifier(move |tool_name, args, channel| {
+        // Store the current chat_id for approval notifications
+        let current_chat_id: Arc<std::sync::RwLock<Option<String>>> =
+            Arc::new(std::sync::RwLock::new(None));
+        let channel_clone = self.clone();
+        let current_chat_id_clone = current_chat_id.clone();
+
+        // Register approval notifier callback
+        crate::approval::register_approval_notifier(move |tool_name, args, channel, context| {
             if channel == "feishu" {
-                tracing::info!("Feishu approval request created: {} - {}", tool_name, args);
+                // Use the context (reply_target) if provided, otherwise try to get from current_chat_id
+                let chat_id = if !context.is_empty() {
+                    context.to_string()
+                } else {
+                    // Fallback: try to get from current_chat_id
+                    current_chat_id_clone
+                        .read()
+                        .ok()
+                        .and_then(|g| g.clone())
+                        .unwrap_or_default()
+                };
+
+                if !chat_id.is_empty() {
+                    let ch = channel_clone.clone();
+                    let tool_name = tool_name.clone();
+                    let args = args.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = ch.send_approval_card(&chat_id, &tool_name, &args).await {
+                            tracing::error!("Failed to send approval card: {}", e);
+                        }
+                    });
+                    tracing::info!(
+                        "Sent approval card to chat {} for tool {}",
+                        chat_id,
+                        tool_name
+                    );
+                } else {
+                    tracing::warn!(
+                        "No chat_id available for approval request: {} - {}",
+                        tool_name,
+                        args
+                    );
+                }
             }
         });
 
@@ -760,6 +797,14 @@ impl LarkChannel {
 
                     let lark_msg = &recv.message;
 
+                    // Store chat_id for approval notifications
+                    {
+                        if let Ok(mut guard) = current_chat_id.write() {
+                            *guard = Some(lark_msg.chat_id.clone());
+                            tracing::debug!("Stored chat_id for approval: {}", lark_msg.chat_id);
+                        }
+                    }
+
                     // Dedup
                     {
                         let now = Instant::now();
@@ -774,6 +819,7 @@ impl LarkChannel {
                     }
 
                     // Decode content by type (mirrors clawdbot-feishu parsing)
+                    tracing::info!("Message type: {}", lark_msg.message_type);
                     let (text, post_mentioned_open_ids) = match lark_msg.message_type.as_str() {
                         "text" => {
                             let v: serde_json::Value = match serde_json::from_str(&lark_msg.content) {
@@ -795,14 +841,44 @@ impl LarkChannel {
                     // Strip @_user_N placeholders
                     let text = strip_at_placeholders(&text);
                     let text = text.trim().to_string();
-                    if text.is_empty() { continue; }
+                    tracing::info!("Lark message text: '{}'", text);
+                    if text.is_empty() {
+                        tracing::warn!("Empty text after strip, skipping");
+                        continue;
+                    }
 
-                    // Check for approval response (yes/no)
+                    // Check if there's a pending approval - if so, send approval request first
+                    let has_pending = {
+                        let binding = crate::approval::global_pending_approvals();
+                        let pending = binding.lock();
+                        pending.values().any(|p| p.channel == "feishu")
+                    };
+                    if has_pending {
+                        let approval_msg = "🔐 **需要审批**\n\n有命令正在等待您的批准。\n\n请回复 `yes` 批准 或 `no` 拒绝";
+                        let ch = self.clone();
+                        let chat_id = lark_msg.chat_id.clone();
+                        tokio::spawn(async move {
+                            let _ = crate::channels::Channel::send(
+                                &ch,
+                                &crate::channels::traits::SendMessage::new(
+                                    approval_msg.to_string(),
+                                    &chat_id,
+                                ),
+                            ).await;
+                        });
+                    }
+
+                    // Check for approval response (yes/no) FIRST, before any other processing
                     let text_lower = text.to_lowercase();
                     if text_lower == "yes" || text_lower == "no" || text_lower == "y" || text_lower == "n" {
-                        // Try to resolve pending approval
+                        tracing::info!("Found approval keyword: {}", text_lower);
+                        // Try to resolve pending approval - use "shell" as default since that's what's usually pending
                         use crate::approval::resolve_pending_by_tool_name;
                         let approved = text_lower == "yes" || text_lower == "y";
+
+                        tracing::info!("Checking for approval response: {}", text_lower);
+
+                        // Try to resolve any pending approval (pass empty string to match any)
                         if resolve_pending_by_tool_name("", approved) {
                             // Send confirmation message
                             let confirm_msg = if approved {

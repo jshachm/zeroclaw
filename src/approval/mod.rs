@@ -21,24 +21,35 @@ static PENDING_APPROVALS: std::sync::LazyLock<Arc<Mutex<HashMap<String, PendingA
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 /// Global callback for notifying about pending approval requests
-/// Arguments: tool_name, arguments, channel
+/// Arguments: tool_name, arguments, channel, context (e.g., chat_id for sending messages)
 static APPROVAL_NOTIFIER: std::sync::LazyLock<
-    Arc<Mutex<Option<Box<dyn Fn(String, String, String) + Send + Sync>>>>,
+    Arc<Mutex<Option<Box<dyn Fn(String, String, String, String) + Send + Sync>>>>,
 > = std::sync::LazyLock::new(|| Arc::new(Mutex::new(None)));
 
 /// Register a callback to be notified when approval is needed
 pub fn register_approval_notifier<F>(callback: F)
 where
-    F: Fn(String, String, String) + Send + Sync + 'static,
+    F: Fn(String, String, String, String) + Send + Sync + 'static,
 {
     *APPROVAL_NOTIFIER.lock() = Some(Box::new(callback));
 }
 
 /// Notify about a pending approval request
-pub fn notify_approval_request(tool_name: &str, args: &str, channel: &str) {
+pub fn notify_approval_request(tool_name: &str, args: &str, channel: &str, context: &str) {
     if let Some(callback) = APPROVAL_NOTIFIER.lock().as_ref() {
-        callback(tool_name.to_string(), args.to_string(), channel.to_string());
+        callback(
+            tool_name.to_string(),
+            args.to_string(),
+            channel.to_string(),
+            context.to_string(),
+        );
     }
+}
+
+/// Check if there's a pending approval request for a channel
+pub fn has_pending_approval_for_channel(channel: &str) -> bool {
+    let pending = PENDING_APPROVALS.lock();
+    pending.values().any(|p| p.channel == channel)
 }
 
 /// Get global pending approvals storage
@@ -593,6 +604,7 @@ mod tests {
 
 /// Resolve a pending approval by tool name (for simple yes/no response)
 /// This can be called from channels like Feishu when user replies with yes/no
+/// If tool_name is empty, resolves the first pending approval for any tool
 pub fn resolve_pending_by_tool_name(tool_name: &str, approved: bool) -> bool {
     let response = if approved {
         ApprovalResponse::Yes
@@ -601,22 +613,30 @@ pub fn resolve_pending_by_tool_name(tool_name: &str, approved: bool) -> bool {
     };
 
     let mut global_pending = PENDING_APPROVALS.lock();
-    if let Some((id, pending)) = global_pending
-        .iter_mut()
-        .find(|(_, p)| p.tool_name == tool_name)
-    {
+
+    // Find matching pending approval - if tool_name is empty, match any
+    let found = if tool_name.is_empty() {
+        global_pending.iter_mut().next()
+    } else {
+        global_pending
+            .iter_mut()
+            .find(|(_, p)| p.tool_name == tool_name)
+    };
+
+    if let Some((id, pending)) = found {
         let id = id.clone();
         if let Some(tx) = pending.response_tx.take() {
             let _ = tx.send(response);
             tracing::info!(
                 "Globally resolved pending approval for tool {} with {:?}",
-                tool_name,
+                pending.tool_name,
                 response
             );
             global_pending.remove(&id);
             return true;
         }
     }
+    tracing::warn!("No pending approval found to resolve");
     false
 }
 
