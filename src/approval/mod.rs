@@ -612,6 +612,16 @@ pub fn resolve_pending_by_tool_name(tool_name: &str, approved: bool) -> bool {
         ApprovalResponse::No
     };
 
+    resolve_pending_by_tool_name_with_response(tool_name, response)
+}
+
+/// Resolve a pending approval by tool name with specific response type
+/// Supports Yes, No, or Always responses
+/// If tool_name is empty, resolves the first pending approval for any tool
+pub fn resolve_pending_by_tool_name_with_response(
+    tool_name: &str,
+    response: ApprovalResponse,
+) -> bool {
     let mut global_pending = PENDING_APPROVALS.lock();
 
     // Find matching pending approval - if tool_name is empty, match any

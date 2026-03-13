@@ -798,16 +798,25 @@ impl LarkChannel {
 
                             tracing::info!("Card action: {} for tool: {}", action_type, tool_name);
 
-                            let approved = action_type == "approve";
+                            // Map action type to ApprovalResponse
+                            use crate::approval::{resolve_pending_by_tool_name_with_response, ApprovalResponse};
+                            let response = match action_type {
+                                "always" => ApprovalResponse::Always,
+                                "approve" => ApprovalResponse::Yes,
+                                "deny" => ApprovalResponse::No,
+                                _ => {
+                                    tracing::warn!("Unknown card action type: {}", action_type);
+                                    continue;
+                                }
+                            };
 
-                            // Resolve the pending approval
-                            use crate::approval::resolve_pending_by_tool_name;
-                            if resolve_pending_by_tool_name(tool_name, approved) {
-                                // Send confirmation message
-                                let confirm_msg = if approved {
-                                    "✅ 已批准执行"
-                                } else {
-                                    "❌ 已拒绝执行"
+                            // Resolve the pending approval with specific response
+                            if resolve_pending_by_tool_name_with_response(tool_name, response) {
+                                // Send confirmation message based on response type
+                                let confirm_msg = match response {
+                                    ApprovalResponse::Always => "✅ 已永久批准此工具",
+                                    ApprovalResponse::Yes => "✅ 已批准执行（仅本次）",
+                                    ApprovalResponse::No => "❌ 已拒绝执行",
                                 };
 
                                 // Get chat_id from context
@@ -1397,9 +1406,21 @@ impl LarkChannel {
                             "tag": "button",
                             "text": {
                                 "tag": "plain_text",
-                                "content": "✅ 同意"
+                                "content": "✅ 永久同意"
                             },
                             "type": "primary",
+                            "value": {
+                                "action": "always",
+                                "tool": tool_name
+                            }
+                        },
+                        {
+                            "tag": "button",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": "👍 仅一次"
+                            },
+                            "type": "default",
                             "value": {
                                 "action": "approve",
                                 "tool": tool_name
@@ -1411,7 +1432,7 @@ impl LarkChannel {
                                 "tag": "plain_text",
                                 "content": "❌ 拒绝"
                             },
-                            "type": "default",
+                            "type": "danger",
                             "value": {
                                 "action": "deny",
                                 "tool": tool_name

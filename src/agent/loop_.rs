@@ -2511,6 +2511,9 @@ pub(crate) async fn run_tool_call_loop(
                                 }
                             };
 
+                        // Record the decision (for "Always" response, adds to session allowlist)
+                        mgr.record_decision(&tool_name, &tool_args, decision, channel_name);
+
                         // If denied, return error
                         if decision == crate::approval::ApprovalResponse::No {
                             ordered_results[idx] = Some((
@@ -2525,7 +2528,7 @@ pub(crate) async fn run_tool_call_loop(
                             ));
                             continue;
                         }
-                        // If approved, continue to execute the tool normally
+                        // If approved (Yes or Always), continue to execute the tool normally
                         // Skip the general approval logic below for Feishu
                     } else if channel_name == "cli" {
                         let decision = mgr.prompt_cli(&request);
