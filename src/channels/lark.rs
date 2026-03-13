@@ -1331,17 +1331,29 @@ impl Channel for LarkChannel {
         // Try to convert markdown to Lark post format for better display
         // If conversion fails or produces invalid format, fall back to plain text
         let post_content = markdown_to_lark_post_safe(&message.content);
-        let body = serde_json::json!({
-            "receive_id": message.recipient,
-            "msg_type": "post",
-            "content": post_content,
+
+        // Build body manually to ensure content is a proper JSON string
+        let body_str = format!(
+            r#"{{"receive_id":"{}","msg_type":"post","content":{}}}"#,
+            message.recipient,
+            serde_json::Value::String(post_content)
+        );
+        let body: serde_json::Value = serde_json::from_str(&body_str).unwrap_or_else(|_| {
+            serde_json::json!({
+                "receive_id": message.recipient,
+                "msg_type": "text",
+                "content": serde_json::json!({"text": message.content}).to_string()
+            })
         });
 
         let (status, response) = self.send_text_once(&url, &token, &body).await?;
 
         if status.as_u16() == 400 {
             // Post format failed, fallback to plain text
-            tracing::warn!("Post message failed, falling back to plain text");
+            tracing::warn!(
+                "Post message failed, falling back to plain text: {:?}",
+                response
+            );
             let content = serde_json::json!({ "text": message.content }).to_string();
             let text_body = serde_json::json!({
                 "receive_id": message.recipient,
